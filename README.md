@@ -52,7 +52,62 @@ Go to [jules.google.com/settings#api](https://jules.google.com/settings#api) and
 
 **4. Register with Claude Code**
 
-Add the following to `.claude/settings.json` in your project root (create the file if it doesn't exist):
+Choose one setup mode:
+
+### Option A: System-wide setup (`~/.claude.json`)
+
+This adds `jules` globally so all projects can use it:
+
+PowerShell (Windows):
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\setup-system-wide.ps1
+```
+
+Node (any OS):
+```bash
+node ./scripts/setup-system-wide.mjs
+```
+
+bash (Linux/macOS):
+```bash
+chmod +x ./scripts/setup-system-wide.sh
+./scripts/setup-system-wide.sh
+```
+
+The script will:
+- Ask for your Jules API key
+- Write/update `~/.claude.json`
+- Use `~/.jules-sessions.json` as the default state file
+
+### Option B: Per-project setup (`<project>/.mcp.json`)
+
+This adds `jules` only for one project:
+
+PowerShell (Windows):
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\setup-project.ps1
+```
+
+Node (any OS):
+```bash
+node ./scripts/setup-project.mjs
+```
+
+bash (Linux/macOS):
+```bash
+chmod +x ./scripts/setup-project.sh
+./scripts/setup-project.sh
+```
+
+The script will:
+- Ask for your Jules API key
+- Ask for your project root path
+- Write/update `<project>/.mcp.json`
+- Set `JULES_STATE_FILE` to `<project>/.jules-sessions.json`
+
+### Manual config (if you prefer)
+
+For project-local config, add this to `<project>/.mcp.json`:
 
 ```json
 {
@@ -69,7 +124,9 @@ Add the following to `.claude/settings.json` in your project root (create the fi
 }
 ```
 
-> `JULES_STATE_FILE` is where delegated tasks and review decisions are persisted. Point it at your project root so the file lives alongside your code. You can `.gitignore` it or commit it — your choice.
+For global config, add the same object under `mcpServers` in `~/.claude.json`.
+
+> `JULES_STATE_FILE` is where delegated tasks and review decisions are persisted. Point it at your project root if you want state tracked per repo. You can `.gitignore` it or commit it.
 
 **5. Verify it works**
 
