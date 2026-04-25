@@ -1,0 +1,14 @@
+{
+  "name": "jules-mcp",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "MCP server to delegate coding tasks from Claude Code to Jules",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.22.0"
+  }
+}
