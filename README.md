@@ -173,6 +173,22 @@ Delegate these tasks to Jules:
 
 Claude Code will call `jules_create_task_batch`, write prompts for Jules, and save them to your state file with context about why each task was created.
 
+Prompt format required by this MCP (strict mode):
+
+```text
+Goal:
+Scope (files/functions):
+Constraints:
+Implementation Steps:
+1.
+2.
+3.
+Acceptance Criteria:
+Verification Commands:
+```
+
+If any required section is missing, or steps are not detailed enough, the MCP rejects the task with a validation error.
+
 **Reviewing Jules' output**
 
 When Jules finishes, ask:
@@ -288,6 +304,8 @@ When Claude Code creates a session, it stores your investigation notes in the `c
 |---|---|---|---|
 | `JULES_API_KEY` | Yes | — | Jules API key from jules.google.com/settings#api |
 | `JULES_STATE_FILE` | No | `.jules-sessions.json` | Path to the local session state file |
+| `JULES_STRICT_PROMPTS` | No | `true` | Enforce prompt template/quality checks in `jules_create_session` and `jules_create_task_batch`. Set to `false` to disable. |
+| `JULES_STARTING_BRANCH` | No | current git branch | Branch sent as `sourceContext.githubRepoContext.startingBranch` when creating sessions. |
 
 ---
 

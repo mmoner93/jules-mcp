@@ -8,7 +8,7 @@
  * Install:  npm install @modelcontextprotocol/sdk zod
  * Run:      JULES_API_KEY=your_key node index.js
  *
- * Register in .claude/settings.json:
+ * Register in <project>/.mcp.json or ~/.claude.json:
  * {
  *   "mcpServers": {
  *     "jules": {
@@ -37,6 +37,7 @@ import { execSync } from "child_process";
 const BASE_URL = "https://jules.googleapis.com/v1alpha";
 const API_KEY = process.env.JULES_API_KEY ?? "";
 const STATE_FILE = process.env.JULES_STATE_FILE ?? ".jules-sessions.json";
+const STRICT_PROMPT_VALIDATION = (process.env.JULES_STRICT_PROMPTS ?? "true").toLowerCase() !== "false";
 
 if (!API_KEY) {
   process.stderr.write(
@@ -81,6 +82,23 @@ function updateSession(session_id, patch) {
   saveState(state);
 }
 
+function detectStartingBranch() {
+  const fromEnv = process.env.JULES_STARTING_BRANCH?.trim();
+  if (fromEnv) return fromEnv;
+
+  try {
+    const branch = execSync("git rev-parse --abbrev-ref HEAD", {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+    }).trim();
+    if (branch && branch !== "HEAD") return branch;
+  } catch {
+    // Not in a git repo or branch unavailable.
+  }
+  return null;
+}
+
 // ─── Repo auto-detection ──────────────────────────────────────────────────────
 
 async function detectSourceName() {
@@ -98,12 +116,21 @@ async function detectSourceName() {
   const match = remoteUrl.match(/github\.com[:/](.+)$/);
   if (!match) throw new Error(`Remote "${remoteUrl}" is not a GitHub URL.`);
   const ownerRepo = match[1];
+  const [owner, repo] = ownerRepo.split("/");
 
   const data = await julesGet("sources");
   const sources = data.sources ?? [];
-  const found = sources.find((s) => s.name === `sources/github/${ownerRepo}`);
+  const found = sources.find((s) => {
+    if (s.name === `sources/github/${ownerRepo}`) return true;
+    if (s.githubRepo?.owner === owner && s.githubRepo?.repo === repo) return true;
+    return false;
+  });
   if (!found) {
-    const connected = sources.map((s) => s.name.replace("sources/github/", "")).join(", ");
+    const connected = sources
+      .map((s) => (s.githubRepo?.owner && s.githubRepo?.repo)
+        ? `${s.githubRepo.owner}/${s.githubRepo.repo}`
+        : s.name.replace("sources/github/", ""))
+      .join(", ");
     throw new Error(`"${ownerRepo}" is not connected to Jules. Connected repos: ${connected}`);
   }
   return found.name;
@@ -115,7 +142,7 @@ async function julesGet(urlPath) {
   const res = await fetch(`${BASE_URL}/${urlPath}`, {
     headers: { "X-Goog-Api-Key": API_KEY, "Content-Type": "application/json" },
   });
-  if (!res.ok) throw new Error(`Jules ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw new Error(`Jules ${res.status} on GET /${urlPath}: ${await res.text()}`);
   return res.json();
 }
 
@@ -125,13 +152,78 @@ async function julesPost(urlPath, body) {
     headers: { "X-Goog-Api-Key": API_KEY, "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`Jules ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw new Error(`Jules ${res.status} on POST /${urlPath}: ${await res.text()}`);
   const text = await res.text();
   return text.trim() ? JSON.parse(text) : {};
 }
 
 function extractId(data) {
   return data?.name?.split("/").pop() ?? data?.id ?? "unknown";
+}
+
+const PROMPT_TEMPLATE = `Goal:
+Scope (files/functions):
+Constraints:
+Implementation Steps:
+1.
+2.
+3.
+Acceptance Criteria:
+Verification Commands:`;
+
+function validateDelegationPrompt(prompt) {
+  const errors = [];
+  const text = (prompt ?? "").trim();
+
+  if (text.length < 200) {
+    errors.push("Prompt is too short (minimum 200 characters).");
+  }
+
+  const requiredSections = [
+    "Goal",
+    "Scope (files/functions)",
+    "Constraints",
+    "Implementation Steps",
+    "Acceptance Criteria",
+    "Verification Commands",
+  ];
+
+  const escapeRegex = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+  for (const section of requiredSections) {
+    const pattern = new RegExp(`(^|\\n)\\s*${escapeRegex(section)}\\s*:`, "i");
+    if (!pattern.test(text)) {
+      errors.push(`Missing section: "${section}:"`);
+    }
+  }
+
+  const stepCount = [...text.matchAll(/(^|\n)\s*\d+\.\s+\S/gm)].length;
+  if (stepCount < 3) {
+    errors.push("Implementation Steps must include at least 3 numbered steps.");
+  }
+
+  return { ok: errors.length === 0, errors };
+}
+
+function assertValidPrompt(prompt, label = "task") {
+  if (!STRICT_PROMPT_VALIDATION) return;
+  const validation = validateDelegationPrompt(prompt);
+  if (validation.ok) return;
+
+  throw new Error(
+    `Prompt for "${label}" rejected by strict validation:\n` +
+    validation.errors.map((e) => `- ${e}`).join("\n") +
+    `\n\nUse this template:\n${PROMPT_TEMPLATE}`
+  );
+}
+
+function buildSourceContext(sourceName) {
+  const sourceContext = { source: sourceName };
+  const startingBranch = detectStartingBranch();
+  if (startingBranch) {
+    sourceContext.githubRepoContext = { startingBranch };
+  }
+  return sourceContext;
 }
 
 /** Fetch live Jules status for a session and return a clean summary */
@@ -185,7 +277,9 @@ server.tool(
     const data = await julesGet("sources");
     const sources = (data.sources ?? []).map((s) => ({
       source_name: s.name,
-      repo: s.name.replace(/^sources\/github\//, ""),
+      repo: (s.githubRepo?.owner && s.githubRepo?.repo)
+        ? `${s.githubRepo.owner}/${s.githubRepo.repo}`
+        : s.name.replace(/^sources\/github\//, ""),
     }));
     return { content: [{ type: "text", text: JSON.stringify({ sources }, null, 2) }] };
   }
@@ -209,8 +303,12 @@ server.tool(
     ),
   },
   async ({ source_name, prompt, label, context }) => {
+    assertValidPrompt(prompt, label);
     const resolvedSource = source_name ?? await detectSourceName();
-    const data = await julesPost("sessions", { source: { name: resolvedSource }, prompt });
+    const data = await julesPost("sessions", {
+      prompt,
+      sourceContext: buildSourceContext(resolvedSource),
+    });
     const id = extractId(data);
 
     recordSession(id, { label, prompt, source_name: resolvedSource, context: context ?? "", resource_name: data.name ?? "" });
@@ -246,9 +344,18 @@ server.tool(
     ).describe("Tasks to run concurrently. Must be independent of each other."),
   },
   async ({ source_name, tasks }) => {
+    for (const task of tasks) {
+      assertValidPrompt(task.prompt, task.label);
+    }
+
     const resolvedSource = source_name ?? await detectSourceName();
     const results = await Promise.allSettled(
-      tasks.map(({ prompt }) => julesPost("sessions", { source: { name: resolvedSource }, prompt }))
+      tasks.map(({ prompt }) =>
+        julesPost("sessions", {
+          prompt,
+          sourceContext: buildSourceContext(resolvedSource),
+        })
+      )
     );
 
     const sessions = results.map((result, i) => {

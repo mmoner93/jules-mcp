@@ -38,6 +38,25 @@ Always provide:
 The `context` field is critical. It's how you remember your reasoning when you come back
 to review Jules' output in a later conversation.
 
+Prompt format required by this MCP (strict mode):
+
+```text
+Goal:
+Scope (files/functions):
+Constraints:
+Implementation Steps:
+1.
+2.
+3.
+Acceptance Criteria:
+Verification Commands:
+```
+
+Rules:
+- Include all sections exactly as headers ending with `:`
+- `Implementation Steps` must have at least 3 numbered steps
+- Keep prompts detailed enough to be actionable end-to-end
+
 ### Step 3 — Review
 When Jules is done, call `jules_review_all_sessions` (default filter: `needs_review`).
 This shows you the dashboard of everything you've delegated.
