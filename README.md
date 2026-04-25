@@ -224,6 +224,8 @@ Once you approve a session, Jules will have opened a PR on GitHub. Review and me
 | `jules_get_session_detail` | Full plan + complete git diff for one session |
 | `jules_mark_session` | Record approve / reject / merged decision |
 | `jules_send_message` | Send Jules feedback to refine its plan or diff |
+| `jules_cancel_session` | Request cancellation of a running/stuck session |
+| `jules_delete_session` | Delete a session remotely (if supported) and/or remove it from local tracking |
 
 ---
 
@@ -306,6 +308,8 @@ When Claude Code creates a session, it stores your investigation notes in the `c
 | `JULES_STATE_FILE` | No | `.jules-sessions.json` | Path to the local session state file |
 | `JULES_STRICT_PROMPTS` | No | `true` | Enforce prompt template/quality checks in `jules_create_session` and `jules_create_task_batch`. Set to `false` to disable. |
 | `JULES_STARTING_BRANCH` | No | current git branch | Branch sent as `sourceContext.githubRepoContext.startingBranch` when creating sessions. |
+| `JULES_AUTO_CREATE_BRANCH` | No | `true` | If starting branch is missing on origin, create/push it before creating a Jules session. |
+| `JULES_BRANCH_BASE` | No | origin default branch (`master` fallback) | Base branch used when auto-creating a missing local/remote starting branch. |
 
 ---
 

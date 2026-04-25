@@ -38,6 +38,7 @@ const BASE_URL = "https://jules.googleapis.com/v1alpha";
 const API_KEY = process.env.JULES_API_KEY ?? "";
 const STATE_FILE = process.env.JULES_STATE_FILE ?? ".jules-sessions.json";
 const STRICT_PROMPT_VALIDATION = (process.env.JULES_STRICT_PROMPTS ?? "true").toLowerCase() !== "false";
+const AUTO_CREATE_BRANCH = (process.env.JULES_AUTO_CREATE_BRANCH ?? "true").toLowerCase() !== "false";
 
 if (!API_KEY) {
   process.stderr.write(
@@ -82,9 +83,19 @@ function updateSession(session_id, patch) {
   saveState(state);
 }
 
+function deleteSession(session_id) {
+  const state = loadState();
+  const existed = Boolean(state.sessions[session_id]);
+  if (existed) {
+    delete state.sessions[session_id];
+    saveState(state);
+  }
+  return existed;
+}
+
 function detectStartingBranch() {
   const fromEnv = process.env.JULES_STARTING_BRANCH?.trim();
-  if (fromEnv) return fromEnv;
+  if (fromEnv) return branchExistsOnOrigin(fromEnv) ? fromEnv : null;
 
   try {
     const branch = execSync("git rev-parse --abbrev-ref HEAD", {
@@ -92,11 +103,109 @@ function detectStartingBranch() {
       encoding: "utf8",
       stdio: ["pipe", "pipe", "pipe"],
     }).trim();
-    if (branch && branch !== "HEAD") return branch;
+    if (branch && branch !== "HEAD") {
+      return branchExistsOnOrigin(branch) ? branch : null;
+    }
   } catch {
     // Not in a git repo or branch unavailable.
   }
   return null;
+}
+
+function branchExistsOnOrigin(branch) {
+  try {
+    const out = execSync(`git ls-remote --heads origin ${branch}`, {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+    }).trim();
+    return Boolean(out);
+  } catch {
+    return false;
+  }
+}
+
+function isSafeBranchName(branch) {
+  return /^[A-Za-z0-9._/-]+$/.test(branch);
+}
+
+function localBranchExists(branch) {
+  try {
+    execSync(`git rev-parse --verify refs/heads/${branch}`, {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function ensureRemoteBranch(branch) {
+  if (!isSafeBranchName(branch)) {
+    throw new Error(`Unsafe branch name "${branch}".`);
+  }
+  if (branchExistsOnOrigin(branch)) return branch;
+
+  if (!AUTO_CREATE_BRANCH) return null;
+
+  if (!localBranchExists(branch)) {
+    const baseBranch = process.env.JULES_BRANCH_BASE?.trim() || detectDefaultBranchOnOrigin() || "master";
+    if (!isSafeBranchName(baseBranch)) {
+      throw new Error(`Unsafe base branch name "${baseBranch}".`);
+    }
+
+    // Make sure remote refs are fresh before creating the local branch.
+    execSync("git fetch origin", {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    try {
+      execSync(`git branch ${branch} origin/${baseBranch}`, {
+        cwd: process.cwd(),
+        encoding: "utf8",
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    } catch {
+      // Fallback: create branch at current HEAD.
+      execSync(`git branch ${branch}`, {
+        cwd: process.cwd(),
+        encoding: "utf8",
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+    }
+  }
+
+  execSync(`git push -u origin ${branch}`, {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+
+  if (!branchExistsOnOrigin(branch)) {
+    throw new Error(`Failed to create remote branch "${branch}" on origin.`);
+  }
+
+  return branch;
+}
+
+function detectDefaultBranchOnOrigin() {
+  try {
+    const out = execSync("git ls-remote --symref origin HEAD", {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const line = out.split("\n").find((l) => l.includes("refs/heads/") && l.includes("HEAD"));
+    if (!line) return null;
+    const match = line.match(/refs\/heads\/([^\s]+)/);
+    return match?.[1] ?? null;
+  } catch {
+    return null;
+  }
 }
 
 // ─── Repo auto-detection ──────────────────────────────────────────────────────
@@ -153,6 +262,16 @@ async function julesPost(urlPath, body) {
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`Jules ${res.status} on POST /${urlPath}: ${await res.text()}`);
+  const text = await res.text();
+  return text.trim() ? JSON.parse(text) : {};
+}
+
+async function julesDelete(urlPath) {
+  const res = await fetch(`${BASE_URL}/${urlPath}`, {
+    method: "DELETE",
+    headers: { "X-Goog-Api-Key": API_KEY, "Content-Type": "application/json" },
+  });
+  if (!res.ok) throw new Error(`Jules ${res.status} on DELETE /${urlPath}: ${await res.text()}`);
   const text = await res.text();
   return text.trim() ? JSON.parse(text) : {};
 }
@@ -218,12 +337,14 @@ function assertValidPrompt(prompt, label = "task") {
 }
 
 function buildSourceContext(sourceName) {
-  const sourceContext = { source: sourceName };
-  const startingBranch = detectStartingBranch();
-  if (startingBranch) {
-    sourceContext.githubRepoContext = { startingBranch };
-  }
-  return sourceContext;
+  const preferredBranch = detectStartingBranch() ?? detectDefaultBranchOnOrigin();
+  const startingBranch = preferredBranch ? ensureRemoteBranch(preferredBranch) : null;
+  if (!startingBranch) return null;
+
+  return {
+    source: sourceName,
+    githubRepoContext: { startingBranch },
+  };
 }
 
 /** Fetch live Jules status for a session and return a clean summary */
@@ -305,9 +426,10 @@ server.tool(
   async ({ source_name, prompt, label, context }) => {
     assertValidPrompt(prompt, label);
     const resolvedSource = source_name ?? await detectSourceName();
+    const sourceContext = buildSourceContext(resolvedSource);
     const data = await julesPost("sessions", {
       prompt,
-      sourceContext: buildSourceContext(resolvedSource),
+      ...(sourceContext ? { sourceContext } : {}),
     });
     const id = extractId(data);
 
@@ -350,12 +472,13 @@ server.tool(
 
     const resolvedSource = source_name ?? await detectSourceName();
     const results = await Promise.allSettled(
-      tasks.map(({ prompt }) =>
-        julesPost("sessions", {
+      tasks.map(({ prompt }) => {
+        const sourceContext = buildSourceContext(resolvedSource);
+        return julesPost("sessions", {
           prompt,
-          sourceContext: buildSourceContext(resolvedSource),
-        })
-      )
+          ...(sourceContext ? { sourceContext } : {}),
+        });
+      })
     );
 
     const sessions = results.map((result, i) => {
@@ -574,6 +697,78 @@ server.tool(
         type: "text",
         text: `Message sent to session ${session_id}. Status reset to "pending". ` +
               `Call jules_review_all_sessions to check Jules' response.`,
+      }],
+    };
+  }
+);
+
+// ── 8. jules_cancel_session ──────────────────────────────────────────────────
+
+server.tool(
+  "jules_cancel_session",
+  "Request cancellation of a Jules session by sending a stop instruction. " +
+  "Also marks the session locally so it no longer appears as pending review.",
+  {
+    session_id: z.string().describe("Session ID to cancel."),
+    reason: z.string().optional().describe("Optional reason for cancellation."),
+  },
+  async ({ session_id, reason }) => {
+    const cancelMessage = reason
+      ? `Cancel this session now. Reason: ${reason}`
+      : "Cancel this session now and stop all further work.";
+
+    await julesPost(`sessions/${session_id}:sendMessage`, { prompt: cancelMessage });
+    updateSession(session_id, {
+      review_status: "rejected",
+      notes: `Cancellation requested at ${new Date().toISOString()}${reason ? `. Reason: ${reason}` : ""}`,
+      cancelled_at: new Date().toISOString(),
+    });
+
+    return {
+      content: [{
+        type: "text",
+        text: `Cancellation request sent for session ${session_id}.`,
+      }],
+    };
+  }
+);
+
+// ── 9. jules_delete_session ──────────────────────────────────────────────────
+
+server.tool(
+  "jules_delete_session",
+  "Delete a session remotely (when supported) and/or remove it from local tracking.",
+  {
+    session_id: z.string().describe("Session ID to delete."),
+    remote_delete: z.boolean().default(true).describe("Attempt DELETE on Jules API (default: true)."),
+    local_delete: z.boolean().default(true).describe("Remove from local state file (default: true)."),
+  },
+  async ({ session_id, remote_delete, local_delete }) => {
+    let remote_status = "skipped";
+    let remote_error = null;
+
+    if (remote_delete) {
+      try {
+        await julesDelete(`sessions/${session_id}`);
+        remote_status = "deleted";
+      } catch (e) {
+        remote_status = "error";
+        remote_error = e.message;
+      }
+    }
+
+    const local_deleted = local_delete ? deleteSession(session_id) : false;
+
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          session_id,
+          remote_status,
+          remote_error,
+          local_deleted,
+          state_file: path.resolve(STATE_FILE),
+        }, null, 2),
       }],
     };
   }

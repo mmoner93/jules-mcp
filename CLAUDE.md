@@ -96,6 +96,8 @@ delegated and what decisions you made. Commit it or add it to `.gitignore` as pr
 | `jules_get_session_detail` | Deep review of one specific task |
 | `jules_mark_session` | After reviewing — record approve/reject |
 | `jules_send_message` | Give Jules feedback to refine its output |
+| `jules_cancel_session` | Request cancellation of a running/stuck session |
+| `jules_delete_session` | Delete a session remotely (if supported) and/or remove it from local tracking |
 
 ---
 
