@@ -30,6 +30,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import fs from "fs";
 import path from "path";
+import { execSync } from "child_process";
 
 // ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -78,6 +79,34 @@ function updateSession(session_id, patch) {
   if (!state.sessions[session_id]) state.sessions[session_id] = { session_id };
   Object.assign(state.sessions[session_id], patch);
   saveState(state);
+}
+
+// ─── Repo auto-detection ──────────────────────────────────────────────────────
+
+async function detectSourceName() {
+  let remoteUrl;
+  try {
+    remoteUrl = execSync("git remote get-url origin", {
+      cwd: process.cwd(),
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "pipe"],
+    }).trim().replace(/\.git$/, "");
+  } catch {
+    throw new Error("Could not read git remote origin. Are you in a git repo?");
+  }
+
+  const match = remoteUrl.match(/github\.com[:/](.+)$/);
+  if (!match) throw new Error(`Remote "${remoteUrl}" is not a GitHub URL.`);
+  const ownerRepo = match[1];
+
+  const data = await julesGet("sources");
+  const sources = data.sources ?? [];
+  const found = sources.find((s) => s.name === `sources/github/${ownerRepo}`);
+  if (!found) {
+    const connected = sources.map((s) => s.name.replace("sources/github/", "")).join(", ");
+    throw new Error(`"${ownerRepo}" is not connected to Jules. Connected repos: ${connected}`);
+  }
+  return found.name;
 }
 
 // ─── Jules REST helpers ───────────────────────────────────────────────────────
@@ -169,7 +198,7 @@ server.tool(
   "Delegate a single coding task to Jules and save it locally for later review. " +
   "Jules runs asynchronously — call jules_review_all_sessions later to check progress.",
   {
-    source_name: z.string().describe("Repo resource name from jules_list_sources."),
+    source_name: z.string().optional().describe("Repo resource name from jules_list_sources. Auto-detected from git remote if omitted."),
     prompt: z.string().describe(
       "Self-contained task for Jules. Include: what to do, which files/functions, expected behaviour, constraints."
     ),
@@ -180,10 +209,11 @@ server.tool(
     ),
   },
   async ({ source_name, prompt, label, context }) => {
-    const data = await julesPost("sessions", { source: { name: source_name }, prompt });
+    const resolvedSource = source_name ?? await detectSourceName();
+    const data = await julesPost("sessions", { source: { name: resolvedSource }, prompt });
     const id = extractId(data);
 
-    recordSession(id, { label, prompt, source_name, context: context ?? "", resource_name: data.name ?? "" });
+    recordSession(id, { label, prompt, source_name: resolvedSource, context: context ?? "", resource_name: data.name ?? "" });
 
     return {
       content: [{
@@ -206,7 +236,7 @@ server.tool(
   "Delegate multiple independent tasks to Jules concurrently. All sessions are tracked locally. " +
   "This is the main token-saving pattern: Claude Code plans, Jules executes in parallel.",
   {
-    source_name: z.string().describe("Repo resource name from jules_list_sources."),
+    source_name: z.string().optional().describe("Repo resource name from jules_list_sources. Auto-detected from git remote if omitted."),
     tasks: z.array(
       z.object({
         label: z.string().describe("Short identifier, e.g. 'add-unit-tests-auth'."),
@@ -216,8 +246,9 @@ server.tool(
     ).describe("Tasks to run concurrently. Must be independent of each other."),
   },
   async ({ source_name, tasks }) => {
+    const resolvedSource = source_name ?? await detectSourceName();
     const results = await Promise.allSettled(
-      tasks.map(({ prompt }) => julesPost("sessions", { source: { name: source_name }, prompt }))
+      tasks.map(({ prompt }) => julesPost("sessions", { source: { name: resolvedSource }, prompt }))
     );
 
     const sessions = results.map((result, i) => {
@@ -227,7 +258,7 @@ server.tool(
         recordSession(id, {
           label: task.label,
           prompt: task.prompt,
-          source_name,
+          source_name: resolvedSource,
           context: task.context ?? "",
           resource_name: result.value.name ?? "",
         });
