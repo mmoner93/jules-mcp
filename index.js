@@ -276,6 +276,81 @@ async function julesDelete(urlPath) {
   return text.trim() ? JSON.parse(text) : {};
 }
 
+async function trySessionAction(session_id, action, fallbackPrompt) {
+  const actionUrl = `${BASE_URL}/sessions/${session_id}:${action}`;
+  const res = await fetch(actionUrl, {
+    method: "POST",
+    headers: { "X-Goog-Api-Key": API_KEY, "Content-Type": "application/json" },
+  });
+
+  if (res.ok) {
+    const text = await res.text();
+    return {
+      mode: "native_action",
+      action,
+      payload: text.trim() ? JSON.parse(text) : {},
+    };
+  }
+
+  await julesPost(`sessions/${session_id}:sendMessage`, { prompt: fallbackPrompt });
+  return {
+    mode: "message_fallback",
+    action,
+    payload: null,
+  };
+}
+
+async function getSessionState(session_id) {
+  try {
+    const data = await julesGet(`sessions/${session_id}`);
+    return data?.state ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function extractPullRequest(session) {
+  const outputs = session?.outputs ?? [];
+  for (const output of outputs) {
+    if (output?.pullRequest?.url) return output.pullRequest;
+  }
+  return null;
+}
+
+async function getPublishStatus(session_id) {
+  const session = await julesGet(`sessions/${session_id}`);
+  const activitiesData = await julesGet(`sessions/${session_id}/activities`);
+  const activities = activitiesData.activities ?? [];
+
+  const pullRequest = extractPullRequest(session);
+  const hasArtifacts = activities.some((a) => (a.artifacts ?? []).length > 0);
+  const state = session?.state ?? "STATE_UNSPECIFIED";
+  const blockers = [];
+  let can_publish_pr = false;
+
+  if (pullRequest) {
+    blockers.push("A pull request already exists for this session.");
+  } else if (state === "AWAITING_PLAN_APPROVAL") {
+    blockers.push("Plan approval is required before execution can continue.");
+  } else if (["FAILED", "QUEUED", "PLANNING", "PAUSED"].includes(state) && !hasArtifacts) {
+    blockers.push(`Session state ${state} is not ready to publish a PR yet.`);
+  } else if (!hasArtifacts && state !== "COMPLETED" && state !== "AWAITING_USER_FEEDBACK" && state !== "IN_PROGRESS") {
+    blockers.push("No code-change artifacts detected yet.");
+  } else {
+    can_publish_pr = true;
+  }
+
+  return {
+    session_id,
+    state,
+    has_artifacts: hasArtifacts,
+    has_pull_request: Boolean(pullRequest),
+    pull_request: pullRequest,
+    can_publish_pr,
+    blockers,
+  };
+}
+
 function extractId(data) {
   return data?.name?.split("/").pop() ?? data?.id ?? "unknown";
 }
@@ -768,6 +843,161 @@ server.tool(
           remote_error,
           local_deleted,
           state_file: path.resolve(STATE_FILE),
+        }, null, 2),
+      }],
+    };
+  }
+);
+
+// ── 10. jules_pause_session ──────────────────────────────────────────────────
+
+server.tool(
+  "jules_pause_session",
+  "Pause a running session. Uses native pause action when available, otherwise requests pause via sendMessage.",
+  {
+    session_id: z.string().describe("Session ID to pause."),
+    reason: z.string().optional().describe("Optional reason for pausing."),
+  },
+  async ({ session_id, reason }) => {
+    const fallbackPrompt = reason
+      ? `Pause this session now and wait for my resume instruction. Reason: ${reason}`
+      : "Pause this session now and wait for my resume instruction.";
+
+    const action = await trySessionAction(session_id, "pause", fallbackPrompt);
+    const state = await getSessionState(session_id);
+
+    updateSession(session_id, {
+      paused_at: new Date().toISOString(),
+      last_pause_reason: reason ?? "",
+      local_status: "paused",
+    });
+
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          session_id,
+          mode: action.mode,
+          state,
+          note: "If state is not PAUSED yet, call jules_get_session_detail or jules_review_all_sessions again shortly.",
+        }, null, 2),
+      }],
+    };
+  }
+);
+
+// ── 11. jules_resume_session ─────────────────────────────────────────────────
+
+server.tool(
+  "jules_resume_session",
+  "Resume a paused session. Uses native resume action when available, otherwise requests resume via sendMessage.",
+  {
+    session_id: z.string().describe("Session ID to resume."),
+    message: z.string().optional().describe("Optional resume instruction for Jules."),
+  },
+  async ({ session_id, message }) => {
+    const fallbackPrompt = message
+      ? `Resume this session now and continue work. Additional instruction: ${message}`
+      : "Resume this session now and continue from where you paused.";
+
+    const action = await trySessionAction(session_id, "resume", fallbackPrompt);
+    const state = await getSessionState(session_id);
+
+    updateSession(session_id, {
+      resumed_at: new Date().toISOString(),
+      local_status: "pending",
+    });
+
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          session_id,
+          mode: action.mode,
+          state,
+          note: "Use jules_review_all_sessions to monitor progress after resume.",
+        }, null, 2),
+      }],
+    };
+  }
+);
+
+// ── 12. jules_check_publish_pr ───────────────────────────────────────────────
+
+server.tool(
+  "jules_check_publish_pr",
+  "Check whether a session is in a state where a pull request can be published.",
+  {
+    session_id: z.string().describe("Session ID to check."),
+  },
+  async ({ session_id }) => {
+    const status = await getPublishStatus(session_id);
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify(status, null, 2),
+      }],
+    };
+  }
+);
+
+// ── 13. jules_publish_pr ─────────────────────────────────────────────────────
+
+server.tool(
+  "jules_publish_pr",
+  "Attempt to publish a pull request for a session. " +
+  "Approves plan first if needed, then asks Jules to create/publish the PR.",
+  {
+    session_id: z.string().describe("Session ID to publish PR for."),
+    message: z.string().optional().describe("Optional instruction appended to the PR publish request."),
+  },
+  async ({ session_id, message }) => {
+    const before = await getPublishStatus(session_id);
+    if (before.has_pull_request) {
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            session_id,
+            published: true,
+            pull_request: before.pull_request,
+            note: "Session already has a pull request.",
+          }, null, 2),
+        }],
+      };
+    }
+
+    if (before.state === "AWAITING_PLAN_APPROVAL") {
+      await julesPost(`sessions/${session_id}:approvePlan`, {});
+    }
+
+    const publishPrompt = message
+      ? `Create and publish a pull request for the current changes. ${message}`
+      : "Create and publish a pull request for the current changes.";
+    await julesPost(`sessions/${session_id}:sendMessage`, { prompt: publishPrompt });
+
+    // Give Jules a short window to emit updated outputs, then re-check.
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    const after = await getPublishStatus(session_id);
+
+    updateSession(session_id, {
+      publish_pr_requested_at: new Date().toISOString(),
+      publish_pr_message: publishPrompt,
+    });
+
+    return {
+      content: [{
+        type: "text",
+        text: JSON.stringify({
+          session_id,
+          publish_request_sent: true,
+          has_pull_request: after.has_pull_request,
+          pull_request: after.pull_request,
+          state: after.state,
+          blockers: after.blockers,
+          next: after.has_pull_request
+            ? "PR is available in pull_request.url."
+            : "Call jules_check_publish_pr or jules_review_all_sessions again shortly.",
         }, null, 2),
       }],
     };

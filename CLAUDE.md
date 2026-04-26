@@ -98,6 +98,10 @@ delegated and what decisions you made. Commit it or add it to `.gitignore` as pr
 | `jules_send_message` | Give Jules feedback to refine its output |
 | `jules_cancel_session` | Request cancellation of a running/stuck session |
 | `jules_delete_session` | Delete a session remotely (if supported) and/or remove it from local tracking |
+| `jules_pause_session` | Pause a running session (native action if available, otherwise pause message) |
+| `jules_resume_session` | Resume a paused session (native action if available, otherwise resume message) |
+| `jules_check_publish_pr` | Check if a session is ready to publish a PR and whether one already exists |
+| `jules_publish_pr` | Approve plan if needed and request Jules to create/publish a PR |
 
 ---
 

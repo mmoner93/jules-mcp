@@ -226,6 +226,10 @@ Once you approve a session, Jules will have opened a PR on GitHub. Review and me
 | `jules_send_message` | Send Jules feedback to refine its plan or diff |
 | `jules_cancel_session` | Request cancellation of a running/stuck session |
 | `jules_delete_session` | Delete a session remotely (if supported) and/or remove it from local tracking |
+| `jules_pause_session` | Pause a running session (native action if available, otherwise pause message) |
+| `jules_resume_session` | Resume a paused session (native action if available, otherwise resume message) |
+| `jules_check_publish_pr` | Check if a session is ready to publish a PR and whether one already exists |
+| `jules_publish_pr` | Approve plan if needed and request Jules to create/publish a PR |
 
 ---
 
